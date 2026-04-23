@@ -1,147 +1,157 @@
-# Affiliation Fetch (Crossref → ORCID → LLM)
+# f0336
+# Fetch Missing Affiliations from ORCID
 
-A Python script that fetches author affiliations (organisations/institutions) using a three-tier strategy, with early exit optimisation — it stops searching as soon as an affiliation is found.
+A Python script that enriches the researcher list produced by [f0335a](https://github.com/data-community-of-practice/f0335a) by fetching employment and education history from the ORCID public API for researchers who have an ORCID identifier but no affiliation data.
+
+No API key is required — ORCID's public API is freely accessible.
+
+## Pipeline context
+
+```
+f0334  →  Crossref_AuthorMetadata.json
+f0335  →  Normalised_Authors.json
+f0335a →  Resolved_Authors.json
+f0336  →  Authors_With_Affiliations.json    (affiliations filled in via ORCID)
+```
+
+Crossref metadata does not always include author affiliations, even when an ORCID is present. This step uses the ORCID ID itself — where one exists — to look up the researcher's public profile directly and extract their employment and education records.
 
 ## How it works
 
-For each unique author, the script loops through their DOIs and name variants. As soon as an affiliation is found on any DOI for any name variant, it stops and moves to the next author.
+For each researcher in the input who has an ORCID but no affiliations (or all researchers if `--overwrite` is set), the script:
 
-### Tier 1 — Crossref (no key needed)
-For each DOI, fetches the full author metadata from the Crossref API. Matches the author by name (using canonical name and all variants) and extracts their listed affiliation(s). Also collects ORCID IDs when publishers have included them.
+1. Calls `https://pub.orcid.org/v3.0/{orcid}/record` to fetch the full public profile.
+2. Extracts affiliations from both the **employments** and **educations** sections of the profile.
+3. Deduplicates by normalised organisation name and merges the results into the researcher's existing `affiliations` list.
+4. Caches the raw ORCID response in `orcid_affiliation_cache.json` — re-runs skip already-fetched ORCIDs.
 
-**Early exit:** Once an affiliation is found on a DOI, the remaining DOIs for that author are skipped.
+Researchers without an ORCID ID are not processed and pass through unchanged.
 
-### Tier 2 — ORCID direct lookup (no key needed)
-For authors where Crossref had no affiliation but did provide an ORCID ID, queries the author's public ORCID profile at `pub.orcid.org/v3.0/{id}/employments` to fetch their employment history. This is a direct public lookup — no credentials, no registration, no token needed.
+## Output
 
-Authors without an ORCID ID in Crossref skip straight to Tier 3.
+One file: **`Authors_With_Affiliations.json`** — the same structure as `Resolved_Authors.json`, with the `affiliations` list enriched for eligible researchers.
 
-### Tier 3 — LLM (optional, needs Anthropic API key)
-For remaining authors, uses Claude with `temperature=0` to infer the most likely institutional affiliation from the author's name, variants, and DOIs. Returns a confidence level (high/medium/low). All results are cached for reproducibility.
+### Affiliation fields
+
+Affiliations sourced from ORCID may include fields not present in Crossref-sourced affiliations:
+
+| Field       | Source | Description |
+|-------------|--------|-------------|
+| `name`      | Always | Organisation name. |
+| `place`     | When available | City and/or country (e.g. `"Melbourne, AU"`). |
+| `ror`       | When available | ROR identifier, if the organisation is disambiguated as ROR in ORCID. |
+| `grid`      | When available | GRID identifier, if disambiguated as GRID. |
+| `ringgold`  | When available | Ringgold identifier, if disambiguated as Ringgold. |
+| `department`| When available | Department or faculty name within the organisation. |
+| `role`      | When available | Job title or role at the organisation. |
+
+### Example affiliation object
+
+```json
+{
+  "name": "University of Melbourne",
+  "place": "Melbourne, AU",
+  "ror": "https://ror.org/01ej9dk98",
+  "department": "School of Computing and Information Systems",
+  "role": "Associate Professor"
+}
+```
 
 ## Requirements
 
 - Python 3.7+
-- Libraries: `openpyxl`, `requests`
+- Library: `requests`
 
 ```bash
-pip install openpyxl requests
+pip install requests
 ```
 
-No API keys required for Tiers 1 and 2. Tier 3 (LLM) is optional and needs an Anthropic API key.
-
-## Setup
-
-Uses the same `config.ini` as the other scripts:
-
-```ini
-[crossref]
-email = yourname@example.com
-delay = 1
-save_every = 50
-max_retries = 3
-
-[anthropic]
-api_key = sk-ant-your-key-here
-```
-
-The `[anthropic]` section is optional. Without it, Tiers 1 and 2 still run.
-
-## Input file format
-
-The script expects the output of `extract_unique_authors.py`:
-
-| Column | Required | Description |
-|---|---|---|
-| `Author_Name` | Yes | The canonical author name |
-| `Name_Variants` | No | Semicolon-separated name variants (used for matching) |
-| `DOI_Count` | No | Number of DOIs (carried through to output) |
-| `DOIs` | Yes | Semicolon-separated DOIs to look up |
+No API key or registration required.
 
 ## Usage
 
-### From a terminal
+```bash
+python f0336.py
+```
+
+By default, reads `Resolved_Authors.json` from the current directory (then the script's directory) and writes `Authors_With_Affiliations.json` alongside it.
+
+Specify paths explicitly:
 
 ```bash
-python f0336.py unique_authors.xlsx
+python f0336.py path/to/Resolved_Authors.json --output path/to/Authors_With_Affiliations.json
 ```
 
-### From Spyder
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `input_json` | Path to input JSON (default: `Resolved_Authors.json`). |
+| `--output`, `-o` | Path for the output file (default: `Authors_With_Affiliations.json`). |
+| `--overwrite` | Fetch ORCID affiliations even for researchers who already have affiliations. Useful to enrich existing data with department/role information. |
+
+### From Spyder or Jupyter
 
 ```python
-!python "E:\your\folder\f0336.py" "E:\your\folder\unique_authors.xlsx"
+!python "E:\your\folder\f0336.py"
 ```
 
-## Output
+## Cache
 
-The script produces `<input_name>_with_affiliations.xlsx` with six columns:
+Results are cached in `orcid_affiliation_cache.json` in the same folder as the input. Each entry maps an ORCID identifier to the list of affiliations extracted from that profile. Re-running the script skips all previously fetched ORCIDs.
 
-| Column | Description |
-|---|---|
-| `Author_Name` | Canonical author name |
-| `Name_Variants` | Other name forms for this author |
-| `Affiliations` | Semicolon-separated organisation/institution names |
-| `Affiliation_Source` | Where the data came from: `Crossref`, `ORCID`, `LLM (high/medium/low)`, or `None` |
-| `DOI_Count` | Number of DOIs associated with this author |
-| `DOIs` | All associated DOIs |
+To force a fresh fetch for all researchers, delete `orcid_affiliation_cache.json` before running.
 
-## How matching works
-
-For each author, the script builds a set of all name forms (canonical + variants). When checking a DOI's Crossref response, it compares each name form against the authors listed on that paper using initial-aware matching (e.g., "S" matches "Susan", "SL" matches "Susan L."). The first match with affiliations wins and the remaining DOIs are skipped.
-
-## Cache files
-
-| File | Purpose |
-|---|---|
-| `<input>_crossref_doi_cache.json` | Crossref author metadata per DOI |
-| `<input>_orcid_cache.json` | ORCID employment data per author |
-| `<input>_llm_aff_cache.json` | LLM-inferred affiliations per author |
-| `<input>_affiliation_cache.json` | Final resolved affiliations per author |
-
-Re-running skips all cached results. Delete a specific cache file to force re-processing for that tier.
-
-## Full pipeline
-
-This script is step 3 in the pipeline:
+## Console output
 
 ```
-1. python crossref_author_fetch.py <input>.xlsx
-     → adds Crossref_Authors column
+Input:  /path/to/Resolved_Authors.json
+Output: /path/to/Authors_With_Affiliations.json
+Cache:  /path/to/orcid_affiliation_cache.json
 
-2. python extract_unique_authors.py <step1_output>.xlsx
-     → one row per unique author with DOIs
+ORCID cache: 143 entries
 
-3. python fetch_affiliations.py <step2_output>.xlsx
-     → adds Affiliations column (Crossref → ORCID → LLM)
+Total researchers:              2075
+  With ORCID:                   891
+  With affiliations:            612
+  Need lookup (ORCID, no aff):  279
 
-4. python extract_unique_orgs.py <step3_output>.xlsx
-     → one row per unique institution with ROR ID
+Fetching affiliations from ORCID API...
+  [1/279] Jane Louise Doe (0000-0001-2345-6789) -> 2 affiliations
+  [2/279] John M. Smith (0000-0002-3456-7890) -> no affiliations in ORCID profile
+  [3/279] Wei Zhang (0000-0003-4567-8901) -> ORCID record not found
+  ...
 
-5. python classify_orgs.py <step4_output>.xlsx
-     → adds Classification (Research/Health/Government/Industry)
+=======================================================
+AFFILIATION FETCH SUMMARY
+=======================================================
+Researchers processed:       279
+  From cache:                143
+  API calls:                 136
+  Affiliations found:        198
+Before: 612 researchers with affiliations
+After:  810 researchers with affiliations
+Gained: 198
+=======================================================
 
-6. python geotag_orgs.py <step5_output>.xlsx
-     → adds coordinates + city/country + generates interactive map
+Saved: /path/to/Authors_With_Affiliations.json
 ```
 
 ## Troubleshooting
 
 | Problem | Solution |
-|---|---|
-| Many `[No affiliation found]` | Not all publishers submit affiliations to Crossref, and not all authors have ORCID profiles. Add an Anthropic API key to enable LLM inference for remaining authors. |
-| `Affiliation_Source` shows `None` | No tier found affiliation data. These authors may need manual lookup. |
-| `Affiliation_Source` shows `LLM (low)` | The LLM had low confidence in its inference. Verify manually. |
-| Rate limit errors | Increase the `delay` value in `config.ini`. |
-| Script interrupted mid-run | Just re-run. All four caches ensure no work is lost. |
-| Wrong affiliation matched | Name matching can occasionally match the wrong co-author if two people on the same paper share a family name. Check the `Name_Variants` column. |
+|---------|----------|
+| `ERROR: pip install requests` | Run `pip install requests` and retry. |
+| `no affiliations in ORCID profile` | The researcher has an ORCID but has not added employment or education records to their public profile. |
+| `ORCID record not found` | The ORCID ID may be invalid, deactivated, or set to private. |
+| Rate limit errors | The script waits 0.3 s between requests. If errors persist, the ORCID API may be temporarily overloaded — wait and re-run (cached results are preserved). |
+| Want to add department/role to already-affiliated researchers | Use `--overwrite` to re-fetch ORCID data for all researchers with an ORCID, not just those missing affiliations. |
 
 ## Limitations
 
-- **Affiliation coverage varies by publisher.** Some publishers consistently provide affiliations in Crossref; others do not.
-- **Affiliations are point-in-time.** They reflect where the author was affiliated when the paper was published, not necessarily their current institution. ORCID employments may be more current.
-- **ORCID coverage.** Only authors who have both registered an ORCID profile and had their ID included by the publisher in Crossref metadata will benefit from Tier 2.
-- **LLM inference.** Claude's affiliation guesses are based on its training data and are not guaranteed to be correct. The confidence level helps gauge reliability.
-- **Early exit trade-off.** The script takes the first affiliation found and stops. If an author changed institutions between papers, only the affiliation from the first matching DOI is captured.
+- Only researchers with an ORCID identifier are eligible for lookup.
+- ORCID profiles are self-reported and may be incomplete, out of date, or set to private by the researcher.
+- The script fetches all employments and educations without date filtering — researchers who have changed institutions over their career will have multiple affiliations listed.
 
 ## License
 
