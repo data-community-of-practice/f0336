@@ -1,0 +1,5 @@
+[crossref]
+email = your_email@example.com
+delay = 1
+save_every = 50
+max_retries = 3
