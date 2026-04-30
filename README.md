@@ -1,119 +1,94 @@
-# f0335a — LLM-Assisted Author Resolution
+# f0336 — ORCID Enrichment via ORCID Public API
 
-Reads `Normalised_Authors.json` (produced by [f0335](https://github.com/data-community-of-practice/f0335)), uses **Claude Haiku** to adjudicate every `similar_to` pair, merges confirmed duplicates, and writes `Resolved_Authors.json` and `LLM_Verdicts.json`.
+Reads a researcher JSON (e.g., `Normalised_Authors.json` from [f0335](https://github.com/data-community-of-practice/f0335) or `Resolved_Authors.json` from [f0335a](https://github.com/data-community-of-practice/f0335a)) and:
 
-## What it does
+1. Searches the ORCID public API to find ORCID IDs for researchers that don't have one.
+2. Fetches full affiliation details (employment + education) from each newly found ORCID profile.
+3. Backfills affiliations for researchers who already had an ORCID but no affiliation data.
 
-1. Extracts all unique `similar_to` pairs from the normalised author list.
-2. Sends each pair to Claude Haiku with a structured prompt covering names, ORCID, affiliations, and shared publications.
-3. Parses the verdict (`same_person`, `confidence`, `reasoning`).
-4. Merges pairs where the LLM says `same_person: true` and confidence meets the threshold.
-5. Saves all verdicts to a cache file (`LLM_Verdicts.json`) so re-runs only call the API for new pairs.
+No API key required — uses the ORCID public API only.
 
 ## Requirements
 
-- Python 3.8+ (standard library only — no third-party packages)
-- Anthropic API key
-
-## API key
-
-Set via environment variable:
+- Python 3.8+
+- [requests](https://pypi.org/project/requests/)
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+pip install requests
 ```
-
-Or via `config.ini`:
-
-```ini
-[anthropic]
-api_key = sk-ant-...
-```
-
-> **Note:** `config.ini` is listed in `.gitignore` and must never be committed.
 
 ## Usage
 
 ```bash
-python f0335a.py [Normalised_Authors.json] [--output Resolved_Authors.json] [options]
+python f0336.py [input.json] [--output output.json] [--dry-run]
 ```
 
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `input_json` | `Normalised_Authors.json` | Input from f0335 |
-| `--output`, `-o` | `Resolved_Authors.json` | Output file |
-| `--config`, `-c` | — | Path to `config.ini` for API key |
-| `--merge-threshold` | `medium` | Minimum confidence to merge: `low`, `medium`, `high` |
-| `--dry-run` | — | List pairs without calling the API |
-| `--clear-cache` | — | Delete `LLM_Verdicts.json` and re-evaluate all pairs |
-
-### Examples
+**Examples:**
 
 ```bash
-# Default run
-python f0335a.py
+# Uses Normalised_Authors.json by default, overwrites in place
+python f0336.py
 
-# Explicit paths
-python f0335a.py my_normalised.json --output my_resolved.json
+# Explicit input, write to a new file
+python f0336.py Resolved_Authors.json --output ORCID_Enriched_Authors.json
 
-# Only merge high-confidence verdicts
-python f0335a.py --merge-threshold high
-
-# Preview pairs without API calls
-python f0335a.py --dry-run
-
-# Force re-evaluation of all pairs
-python f0335a.py --clear-cache
+# Preview which researchers will be searched (no API calls)
+python f0336.py Resolved_Authors.json --dry-run
 ```
+
+## Search strategy
+
+For each researcher without an ORCID, the following strategies are tried in order:
+
+| Step | Query | Accepted when |
+|---|---|---|
+| 1 | `given-names + family-name + affiliation-org-name` | Exactly 1 result, OR 2–5 results with an affiliation match |
+| 2 | `given-names + family-name` | Exactly 1 result, OR 2–5 results with an affiliation match |
+| 3 | Each name variant (given + family) | Exactly 1 result, OR 2–5 results with an affiliation match |
+
+When multiple results are returned (2–5), the script fetches each candidate's ORCID employment record and checks for affiliation overlap (Jaccard token similarity ≥ 0.4). Results with 6 or more candidates are rejected as too ambiguous.
+
+## Affiliation enrichment
+
+Whenever an ORCID is found (or already existed) and the researcher has no affiliations, the script fetches the full ORCID profile (employments + educations) and merges the structured affiliation data into the record:
+
+```json
+{
+  "name": "Swinburne University of Technology",
+  "source": "orcid",
+  "place": "Hawthorn, AU",
+  "ror": "https://ror.org/031rekg67",
+  "department": "Centre for Astrophysics and Supercomputing",
+  "role": "Research Fellow"
+}
+```
+
+Affiliations are deduplicated by name before merging.
+
+## Caching
+
+Search results and fetched affiliation records are saved to `orcid_search_cache.json` alongside the input file. Re-runs skip any query already in the cache, making interrupted runs safely resumable.
 
 ## Output
 
-### `Resolved_Authors.json`
+The output file has the same schema as the input, with two fields updated where applicable:
 
-Same schema as `Normalised_Authors.json` but with confirmed duplicates merged. Merged researchers get `"merge_confidence": "llm_verified"`. The `similar_to` field is cleaned up to remove references to merged-away records.
-
-### `LLM_Verdicts.json`
-
-One entry per evaluated pair:
-
-```json
-[
-  {
-    "id1": "550e8400-...",
-    "id2": "661f9511-...",
-    "name1": "Philip J. Sumner",
-    "name2": "Philip Sumner",
-    "same_person": true,
-    "confidence": "high",
-    "reasoning": "Shared affiliation and publication; name difference is middle initial only.",
-    "raw_response": "..."
-  }
-]
-```
-
-## Merge logic
-
-- **Primary record selection:** prefers the record with an ORCID; on a tie, the one with more publications.
-- **Merge behaviour:** longer given name wins; publications, affiliations, and name variants are unioned (deduplicated).
-- **Transitive chains:** if A→B and B→C are both confirmed, all three are merged into one record.
-- **Threshold:** pairs below the `--merge-threshold` confidence level are kept as `similar_to` references, not merged.
+- `orcid` — filled with the found ORCID iD
+- `affiliations` — extended with structured data from the ORCID profile
 
 ## Output statistics
 
 ```
-============================================================
-  SUMMARY
-============================================================
-  Pairs reviewed:        18
-  Same person verdicts:  11
-  Different verdicts:    7
-  Merges applied:        11
-  Researchers before:    521
-  Researchers after:     510
-============================================================
-
-  Output: Resolved_Authors.json
-  Verdicts: LLM_Verdicts.json
+=======================================================
+ORCID LOOKUP SUMMARY
+=======================================================
+ORCID IDs found:         23/182
+    via name+affiliation:  14
+    via name_only:         7
+    via name_variant:      2
+  Not found:             159
+Affiliations filled:     31
+ORCIDs: 81 -> 104 / 263 researchers
+Affiliations: 198 / 263 researchers
+=======================================================
 ```
